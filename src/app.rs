@@ -44,10 +44,15 @@ pub struct LimitedForgeApp {
 impl LimitedForgeApp {
     pub fn new() -> Self {
         let default_path = "src/AllPrintings.json".to_string();
-        let rx = Self::start_load(&default_path);
+        let file_exists = std::path::Path::new(&default_path).exists();
+        let (screen, load_rx) = if file_exists {
+            (Screen::Loading, Some(Self::start_load(&default_path)))
+        } else {
+            (Screen::Setup, None)
+        };
         Self {
-            screen: Screen::Loading,
-            load_rx: Some(rx),
+            screen,
+            load_rx,
             all_printings: None,
             sets: Vec::new(),
             data_path: default_path,
@@ -226,6 +231,26 @@ impl LimitedForgeApp {
             });
 
             ui.add_space(6.0);
+
+            if self.all_printings.is_none() {
+                retro_group(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("! NO DATA LOADED")
+                            .monospace()
+                            .strong()
+                            .color(egui::Color32::RED),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Card data file not found. Please use [ BROWSE... ] above\n\
+                             to locate your AllPrintings.json file.",
+                        )
+                        .monospace(),
+                    );
+                });
+                return;
+            }
 
             retro_group(ui, |ui| {
                 ui.label(egui::RichText::new("FORMAT").monospace().strong());
