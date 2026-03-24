@@ -1,3 +1,4 @@
+use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -11,7 +12,17 @@ use crate::data;
 use crate::mtgjson::AllPrintings;
 use crate::pack::{OwnedPackCard, PackGenerator};
 
+const MTGJSON_URL: &str = "https://mtgjson.com/api/v5/AllPrintings.json";
+
+enum DownloadMsg {
+    Progress { downloaded: u64, total: u64 },
+    Done(String),
+    Err(String),
+}
+
 enum Screen {
+    DataSource,
+    Downloading,
     Loading,
     Setup,
     Results {
@@ -23,6 +34,8 @@ enum Screen {
 pub struct LimitedForgeApp {
     screen: Screen,
     load_rx: Option<mpsc::Receiver<Result<AllPrintings, String>>>,
+    download_rx: Option<mpsc::Receiver<DownloadMsg>>,
+    download_progress: (u64, u64), // (downloaded, total)
     all_printings: Option<AllPrintings>,
     sets: Vec<(String, String)>, // (code, name) sorted by name
     data_path: String,
@@ -41,18 +54,42 @@ pub struct LimitedForgeApp {
     export_status: Option<String>,
 }
 
+/// Returns the path to look for AllPrintings.json at startup.
+/// Checks next to the executable first (distribution mode), then falls back to the dev path.
+fn default_data_path() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("AllPrintings.json");
+            if p.exists() {
+                return p.to_string_lossy().into_owned();
+            }
+        }
+    }
+    "src/AllPrintings.json".to_string()
+}
+
+/// Where a downloaded AllPrintings.json will be saved (next to the executable).
+fn download_save_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("AllPrintings.json")))
+        .unwrap_or_else(|| std::path::PathBuf::from("AllPrintings.json"))
+}
+
 impl LimitedForgeApp {
     pub fn new() -> Self {
-        let default_path = "src/AllPrintings.json".to_string();
+        let default_path = default_data_path();
         let file_exists = std::path::Path::new(&default_path).exists();
         let (screen, load_rx) = if file_exists {
             (Screen::Loading, Some(Self::start_load(&default_path)))
         } else {
-            (Screen::Setup, None)
+            (Screen::DataSource, None)
         };
         Self {
             screen,
             load_rx,
+            download_rx: None,
+            download_progress: (0, 0),
             all_printings: None,
             sets: Vec::new(),
             data_path: default_path,
@@ -73,6 +110,56 @@ impl LimitedForgeApp {
         thread::spawn(move || {
             let result = data::load(std::path::Path::new(&path)).map_err(|e| e.to_string());
             let _ = tx.send(result);
+        });
+        rx
+    }
+
+    fn start_download() -> mpsc::Receiver<DownloadMsg> {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let resp = match ureq::get(MTGJSON_URL).call() {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(DownloadMsg::Err(e.to_string()));
+                    return;
+                }
+            };
+            let total: u64 = resp
+                .header("Content-Length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let save_path = download_save_path();
+            let mut file = match std::fs::File::create(&save_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = tx.send(DownloadMsg::Err(format!(
+                        "Cannot create file {}: {}",
+                        save_path.display(),
+                        e
+                    )));
+                    return;
+                }
+            };
+            let mut reader = resp.into_reader();
+            let mut buf = [0u8; 65536];
+            let mut downloaded = 0u64;
+            loop {
+                let n = match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) => {
+                        let _ = tx.send(DownloadMsg::Err(e.to_string()));
+                        return;
+                    }
+                };
+                if let Err(e) = file.write_all(&buf[..n]) {
+                    let _ = tx.send(DownloadMsg::Err(e.to_string()));
+                    return;
+                }
+                downloaded += n as u64;
+                let _ = tx.send(DownloadMsg::Progress { downloaded, total });
+            }
+            let _ = tx.send(DownloadMsg::Done(save_path.to_string_lossy().into_owned()));
         });
         rx
     }
@@ -122,6 +209,192 @@ impl LimitedForgeApp {
             .take(7)
             .cloned()
             .collect();
+    }
+
+    fn show_data_source(&mut self, ctx: &egui::Context) {
+        let mut new_path: Option<String> = None;
+        let mut start_download = false;
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            title_bar(ui, "LimitedForge - Setup");
+            ui.add_space(10.0);
+
+            retro_group(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("! NO CARD DATA FOUND")
+                        .monospace()
+                        .strong()
+                        .color(egui::Color32::RED),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "AllPrintings.json was not found. Please download it\n\
+                         from MTGJSON or provide a local copy.",
+                    )
+                    .monospace(),
+                );
+            });
+
+            ui.add_space(10.0);
+
+            retro_group(ui, |ui| {
+                ui.label(egui::RichText::new("DATA SOURCE").monospace().strong());
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(
+                            egui::RichText::new("[ DOWNLOAD FROM MTGJSON ]")
+                                .monospace()
+                                .strong(),
+                        )
+                        .clicked()
+                    {
+                        start_download = true;
+                    }
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("~500 MB — downloads AllPrintings.json")
+                            .monospace()
+                            .weak(),
+                    );
+                });
+
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(egui::RichText::new("[ BROWSE LOCAL FILE... ]").monospace())
+                        .clicked()
+                    {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("JSON", &["json"])
+                            .set_title("Select AllPrintings.json")
+                            .pick_file()
+                        {
+                            new_path = Some(path.to_string_lossy().into_owned());
+                        }
+                    }
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("Use an existing local AllPrintings.json")
+                            .monospace()
+                            .weak(),
+                    );
+                });
+            });
+
+            if let Some(err) = &self.error {
+                ui.add_space(8.0);
+                retro_group(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("ERROR: {}", err))
+                            .monospace()
+                            .color(egui::Color32::RED),
+                    );
+                });
+            }
+        });
+
+        if start_download {
+            self.error = None;
+            self.download_progress = (0, 0);
+            self.download_rx = Some(Self::start_download());
+            self.screen = Screen::Downloading;
+        }
+        if let Some(path) = new_path {
+            self.reload(path);
+        }
+    }
+
+    fn show_downloading(&mut self, ctx: &egui::Context) {
+        // Poll the download channel
+        let mut done_path: Option<String> = None;
+        if let Some(rx) = &self.download_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(DownloadMsg::Progress { downloaded, total }) => {
+                        self.download_progress = (downloaded, total);
+                    }
+                    Ok(DownloadMsg::Done(path)) => {
+                        done_path = Some(path);
+                        break;
+                    }
+                    Ok(DownloadMsg::Err(e)) => {
+                        self.error = Some(e);
+                        self.download_rx = None;
+                        self.screen = Screen::DataSource;
+                        return;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.error = Some("Download thread disconnected.".into());
+                        self.download_rx = None;
+                        self.screen = Screen::DataSource;
+                        return;
+                    }
+                }
+            }
+        }
+
+        ctx.request_repaint_after(Duration::from_millis(100));
+        self.tick = self.tick.wrapping_add(1);
+
+        let (downloaded, total) = self.download_progress;
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            title_bar(ui, "LimitedForge - Downloading");
+            ui.add_space(40.0);
+            ui.centered_and_justified(|ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Downloading AllPrintings.json...")
+                            .monospace()
+                            .size(14.0),
+                    );
+                    ui.add_space(8.0);
+
+                    let progress_text = if total > 0 {
+                        let pct = (downloaded as f64 / total as f64 * 100.0) as u64;
+                        let bar_width = 20usize;
+                        let filled = (downloaded as f64 / total as f64 * bar_width as f64) as usize;
+                        let bar = format!(
+                            "[{}{}] {}%  ({:.1} / {:.1} MB)",
+                            "█".repeat(filled),
+                            "░".repeat(bar_width - filled),
+                            pct,
+                            downloaded as f64 / 1_048_576.0,
+                            total as f64 / 1_048_576.0,
+                        );
+                        bar
+                    } else {
+                        let bar_width = 20usize;
+                        let filled = ((self.tick / 2) % (bar_width as u64 + 1)) as usize;
+                        format!(
+                            "[{}{}]  {:.1} MB received",
+                            "█".repeat(filled),
+                            "░".repeat(bar_width - filled),
+                            downloaded as f64 / 1_048_576.0,
+                        )
+                    };
+
+                    ui.label(egui::RichText::new(progress_text).monospace().size(13.0));
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("Source: mtgjson.com")
+                            .monospace()
+                            .size(11.0)
+                            .weak(),
+                    );
+                });
+            });
+        });
+
+        if let Some(path) = done_path {
+            self.download_rx = None;
+            self.reload(path);
+        }
     }
 
     fn show_loading(&mut self, ctx: &egui::Context) {
@@ -231,26 +504,6 @@ impl LimitedForgeApp {
             });
 
             ui.add_space(6.0);
-
-            if self.all_printings.is_none() {
-                retro_group(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new("! NO DATA LOADED")
-                            .monospace()
-                            .strong()
-                            .color(egui::Color32::RED),
-                    );
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(
-                            "Card data file not found. Please use [ BROWSE... ] above\n\
-                             to locate your AllPrintings.json file.",
-                        )
-                        .monospace(),
-                    );
-                });
-                return;
-            }
 
             retro_group(ui, |ui| {
                 ui.label(egui::RichText::new("FORMAT").monospace().strong());
@@ -408,7 +661,7 @@ impl LimitedForgeApp {
         let export_status = self.export_status.clone();
 
         let mut go_back = false;
-        let mut do_export = false;
+        let mut export_dir: Option<std::path::PathBuf> = None;
 
         {
             let (player_packs, promos) = match &self.screen {
@@ -447,7 +700,12 @@ impl LimitedForgeApp {
                                 )
                                 .clicked()
                             {
-                                do_export = true;
+                                if let Some(dir) = rfd::FileDialog::new()
+                                    .set_title("Choose export folder")
+                                    .pick_folder()
+                                {
+                                    export_dir = Some(dir);
+                                }
                             }
                         },
                     );
@@ -507,12 +765,12 @@ impl LimitedForgeApp {
         if go_back {
             self.screen = Screen::Setup;
         }
-        if do_export {
-            self.export_to_moxfield();
+        if let Some(dir) = export_dir {
+            self.export_to_moxfield(dir);
         }
     }
 
-    fn export_to_moxfield(&mut self) {
+    fn export_to_moxfield(&mut self, dir: std::path::PathBuf) {
         let player_lines: Vec<Vec<String>> = match &self.screen {
             Screen::Results { packs, promos } => packs
                 .iter()
@@ -533,12 +791,6 @@ impl LimitedForgeApp {
             _ => return,
         };
 
-        let dir = std::path::Path::new("moxfield_export");
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            self.export_status = Some(format!("Export failed: {}", e));
-            return;
-        }
-
         let count = player_lines.len();
         for (p_idx, lines) in player_lines.iter().enumerate() {
             let path = dir.join(format!("player_{}.txt", p_idx + 1));
@@ -548,7 +800,11 @@ impl LimitedForgeApp {
             }
         }
 
-        self.export_status = Some(format!("Exported {} files to moxfield_export/", count));
+        self.export_status = Some(format!(
+            "Exported {} files to {}",
+            count,
+            dir.display()
+        ));
     }
 }
 
@@ -736,6 +992,8 @@ impl eframe::App for LimitedForgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_retro_theme(ctx);
         match &self.screen {
+            Screen::DataSource => self.show_data_source(ctx),
+            Screen::Downloading => self.show_downloading(ctx),
             Screen::Loading => self.show_loading(ctx),
             Screen::Setup => self.show_setup(ctx),
             Screen::Results { .. } => self.show_results(ctx),
