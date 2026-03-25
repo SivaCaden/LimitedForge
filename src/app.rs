@@ -4,7 +4,6 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
-use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
@@ -13,6 +12,12 @@ use crate::mtgjson::AllPrintings;
 use crate::pack::{OwnedPackCard, PackGenerator};
 
 const MTGJSON_URL: &str = "https://mtgjson.com/api/v5/AllPrintings.json";
+
+#[derive(PartialEq, Clone, Copy)]
+enum Format {
+    Limited,
+    PreRelease,
+}
 
 enum DownloadMsg {
     Progress { downloaded: u64, total: u64 },
@@ -26,8 +31,9 @@ enum Screen {
     Loading,
     Setup,
     Results {
-        packs: Vec<Vec<Vec<OwnedPackCard>>>, // [player][pack][card]
+        packs: Vec<Vec<Vec<OwnedPackCard>>>, // [player][slot][card]
         promos: Vec<OwnedPackCard>,          // one per player
+        slot_names: Vec<String>,             // set name per slot
     },
 }
 
@@ -41,11 +47,11 @@ pub struct LimitedForgeApp {
     data_path: String,
 
     // Setup form
+    format: Format,
     set_query: String,
-    selected_set: Option<String>,
+    selected_sets: Vec<(String, String, usize)>, // pack slots: (code, name, count)
     predictions: Vec<(String, String)>,
     num_players: usize,
-    packs_per_player: usize,
 
     // Loading animation
     tick: u64,
@@ -93,11 +99,11 @@ impl LimitedForgeApp {
             all_printings: None,
             sets: Vec::new(),
             data_path: default_path,
+            format: Format::Limited,
             set_query: String::new(),
-            selected_set: None,
+            selected_sets: Vec::new(),
             predictions: Vec::new(),
             num_players: 8,
-            packs_per_player: 3,
             tick: 0,
             error: None,
             export_status: None,
@@ -169,7 +175,7 @@ impl LimitedForgeApp {
         self.all_printings = None;
         self.sets.clear();
         self.set_query.clear();
-        self.selected_set = None;
+        self.selected_sets.clear();
         self.predictions.clear();
         self.error = None;
         self.export_status = None;
@@ -359,15 +365,14 @@ impl LimitedForgeApp {
                         let pct = (downloaded as f64 / total as f64 * 100.0) as u64;
                         let bar_width = 20usize;
                         let filled = (downloaded as f64 / total as f64 * bar_width as f64) as usize;
-                        let bar = format!(
+                        format!(
                             "[{}{}] {}%  ({:.1} / {:.1} MB)",
                             "█".repeat(filled),
                             "░".repeat(bar_width - filled),
                             pct,
                             downloaded as f64 / 1_048_576.0,
                             total as f64 / 1_048_576.0,
-                        );
-                        bar
+                        )
                     } else {
                         let bar_width = 20usize;
                         let filled = ((self.tick / 2) % (bar_width as u64 + 1)) as usize;
@@ -470,6 +475,10 @@ impl LimitedForgeApp {
 
     fn show_setup(&mut self, ctx: &egui::Context) {
         let mut new_path: Option<String> = None;
+        // Slot to add/increment when user clicks a prediction
+        let mut add_slot: Option<(String, String)> = None;
+        let mut decrement_idx: Option<usize> = None;
+        let mut increment_idx: Option<usize> = None;
 
         egui::CentralPanel::default().show(ctx, |ui| {
             title_bar(ui, "LimitedForge - Setup");
@@ -511,28 +520,58 @@ impl LimitedForgeApp {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Format:").monospace());
                     ui.add_space(4.0);
-                    let _ = ui.selectable_label(true, egui::RichText::new("Limited").monospace());
+                    if ui
+                        .selectable_label(
+                            self.format == Format::Limited,
+                            egui::RichText::new("Limited").monospace(),
+                        )
+                        .clicked()
+                    {
+                        self.format = Format::Limited;
+                    }
+                    ui.scope(|ui| {
+                        let red = egui::Color32::from_rgb(180, 0, 0);
+                        let dark_red = egui::Color32::from_rgb(120, 0, 0);
+                        ui.visuals_mut().widgets.inactive.bg_fill = red;
+                        ui.visuals_mut().widgets.inactive.weak_bg_fill = red;
+                        ui.visuals_mut().widgets.hovered.bg_fill = dark_red;
+                        ui.visuals_mut().widgets.hovered.weak_bg_fill = dark_red;
+                        ui.visuals_mut().widgets.active.bg_fill = dark_red;
+                        ui.visuals_mut().widgets.active.weak_bg_fill = dark_red;
+                        ui.visuals_mut().selection.bg_fill = dark_red;
+                        if ui
+                            .selectable_label(
+                                self.format == Format::PreRelease,
+                                egui::RichText::new("Pre-Release").monospace(),
+                            )
+                            .clicked()
+                        {
+                            self.format = Format::PreRelease;
+                            self.num_players = 1;
+                        }
+                    });
                 });
             });
 
             ui.add_space(6.0);
 
             retro_group(ui, |ui| {
-                ui.label(egui::RichText::new("SET SELECTION").monospace().strong());
+                ui.label(egui::RichText::new("SET SLOTS").monospace().strong());
                 ui.add_space(4.0);
+
+                // Search input
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Set:").monospace());
                     ui.add_space(4.0);
                     let response = ui.text_edit_singleline(&mut self.set_query);
                     if response.changed() {
-                        self.selected_set = None;
                         self.update_predictions();
                     }
                 });
 
+                // Autocomplete dropdown — clicking a prediction adds it as a slot
                 if !self.predictions.is_empty() {
                     let predictions = self.predictions.clone();
-                    let mut chosen: Option<(String, String)> = None;
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         for (code, name) in &predictions {
                             let label = format!("{} ({})", name, code);
@@ -540,36 +579,71 @@ impl LimitedForgeApp {
                                 .selectable_label(false, egui::RichText::new(&label).monospace())
                                 .clicked()
                             {
-                                chosen = Some((code.clone(), name.clone()));
+                                add_slot = Some((code.clone(), name.clone()));
                             }
                         }
                     });
-                    if let Some((code, name)) = chosen {
-                        self.set_query = name;
-                        self.selected_set = Some(code);
-                        self.predictions.clear();
+                }
+
+                // Slot list
+                if !self.selected_sets.is_empty() {
+                    ui.add_space(4.0);
+                    let slots: Vec<(usize, String, String, usize)> = self
+                        .selected_sets
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (c, n, cnt))| (i, c.clone(), n.clone(), *cnt))
+                        .collect();
+                    for (idx, code, name, count) in &slots {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(egui::RichText::new("[ - ]").monospace())
+                                .clicked()
+                            {
+                                decrement_idx = Some(*idx);
+                            }
+                            if ui
+                                .button(egui::RichText::new("[ + ]").monospace())
+                                .clicked()
+                            {
+                                increment_idx = Some(*idx);
+                            }
+                            ui.label(
+                                egui::RichText::new(format!("{}  {} ({})", count, name, code))
+                                    .monospace(),
+                            );
+                        });
                     }
+                } else {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "No slots added. Search for a set and click it to add.",
+                        )
+                        .monospace()
+                        .weak(),
+                    );
                 }
             });
 
             ui.add_space(6.0);
 
             retro_group(ui, |ui| {
-                ui.label(egui::RichText::new("PLAYERS & PACKS").monospace().strong());
+                ui.label(egui::RichText::new("PLAYERS").monospace().strong());
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Players:").monospace());
-                    ui.add(egui::Slider::new(&mut self.num_players, 1..=16));
-                });
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Packs:  ").monospace());
-                    ui.add(egui::Slider::new(&mut self.packs_per_player, 1..=6));
+                    if self.format == Format::PreRelease {
+                        ui.label(egui::RichText::new("1  (Pre-Release)").monospace().weak());
+                    } else {
+                        ui.add(egui::Slider::new(&mut self.num_players, 1..=16));
+                    }
                 });
             });
 
             ui.add_space(10.0);
 
-            let can_generate = self.selected_set.is_some();
+            let can_generate = !self.selected_sets.is_empty();
             ui.add_enabled_ui(can_generate, |ui| {
                 if ui
                     .button(egui::RichText::new("[ GENERATE PACKS ]").monospace().strong())
@@ -589,85 +663,109 @@ impl LimitedForgeApp {
             }
         });
 
+        let pack_cap = if self.format == Format::PreRelease { 6 } else { usize::MAX };
+        let total_packs: usize = self.selected_sets.iter().map(|(_, _, c)| c).sum();
+
+        if let Some((code, name)) = add_slot {
+            if total_packs < pack_cap {
+                if let Some(entry) = self.selected_sets.iter_mut().find(|(c, _, _)| *c == code) {
+                    entry.2 += 1;
+                } else {
+                    self.selected_sets.push((code, name, 1));
+                }
+            }
+            self.set_query.clear();
+            self.predictions.clear();
+        }
+        if let Some(idx) = decrement_idx {
+            self.selected_sets[idx].2 = self.selected_sets[idx].2.saturating_sub(1);
+            if self.selected_sets[idx].2 == 0 {
+                self.selected_sets.remove(idx);
+            }
+        }
+        if let Some(idx) = increment_idx {
+            if total_packs < pack_cap {
+                self.selected_sets[idx].2 += 1;
+            }
+        }
         if let Some(path) = new_path {
             self.reload(path);
         }
     }
 
     fn generate_packs(&mut self) {
-        let set_code = match &self.selected_set {
-            Some(c) => c.clone(),
-            None => return,
-        };
+        if self.selected_sets.is_empty() {
+            return;
+        }
         let all_printings = match &self.all_printings {
             Some(ap) => ap,
             None => return,
         };
 
-        let generator = match PackGenerator::new(&set_code, &all_printings.data) {
-            Ok(g) => g,
-            Err(e) => {
-                self.error = Some(e.to_string());
-                return;
+        // Build one PackGenerator per unique set code
+        let mut generators: std::collections::HashMap<String, PackGenerator<'_>> =
+            std::collections::HashMap::new();
+        for (code, _name, _count) in &self.selected_sets {
+            if !generators.contains_key(code) {
+                match PackGenerator::new(code, &all_printings.data) {
+                    Ok(g) => {
+                        generators.insert(code.clone(), g);
+                    }
+                    Err(e) => {
+                        self.error = Some(e.to_string());
+                        return;
+                    }
+                }
             }
-        };
-
-        let rare_pool: Vec<OwnedPackCard> = all_printings
-            .data
-            .get(&set_code)
-            .map(|set| {
-                set.cards
-                    .iter()
-                    .filter(|c| c.rarity == "rare" || c.rarity == "mythic")
-                    .map(|c| OwnedPackCard::from_card(c, false))
-                    .collect()
-            })
-            .unwrap_or_default();
+        }
 
         let mut rng = StdRng::from_entropy();
         let num_players = self.num_players;
-        let packs_per_player = self.packs_per_player;
+
+        // Expand (code, name, count) into flat (code, name) slot list
+        let slots: Vec<(String, String)> = self
+            .selected_sets
+            .iter()
+            .flat_map(|(code, name, count)| {
+                std::iter::repeat((code.clone(), name.clone())).take(*count)
+            })
+            .collect();
+        let slot_names: Vec<String> = slots.iter().map(|(_, name)| name.clone()).collect();
 
         let mut player_packs: Vec<Vec<Vec<OwnedPackCard>>> = Vec::new();
         for _ in 0..num_players {
             let mut packs = Vec::new();
-            for _ in 0..packs_per_player {
-                let pack = generator.generate_pack(&mut rng);
-                let owned: Vec<OwnedPackCard> = pack.iter().map(OwnedPackCard::from).collect();
-                packs.push(owned);
+            for (code, _name) in &slots {
+                if let Some(generator) = generators.get(code) {
+                    let pack = generator.generate_pack(&mut rng);
+                    let owned: Vec<OwnedPackCard> = pack.iter().map(OwnedPackCard::from).collect();
+                    packs.push(owned);
+                }
             }
             player_packs.push(packs);
         }
 
-        let promos: Vec<OwnedPackCard> = if rare_pool.is_empty() {
-            Vec::new()
-        } else {
-            (0..num_players)
-                .map(|_| rare_pool[rng.gen_range(0..rare_pool.len())].clone())
-                .collect()
-        };
-
         self.export_status = None;
         self.screen = Screen::Results {
             packs: player_packs,
-            promos,
+            promos: Vec::new(),
+            slot_names,
         };
     }
 
     fn show_results(&mut self, ctx: &egui::Context) {
-        let set_code = self.selected_set.clone().unwrap_or_default();
         let num_players = self.num_players;
-        let packs_per_player = self.packs_per_player;
         let export_status = self.export_status.clone();
 
         let mut go_back = false;
         let mut export_dir: Option<std::path::PathBuf> = None;
 
         {
-            let (player_packs, promos) = match &self.screen {
-                Screen::Results { packs, promos } => (packs, promos),
+            let (player_packs, promos, slot_names) = match &self.screen {
+                Screen::Results { packs, promos, slot_names } => (packs, promos, slot_names),
                 _ => return,
             };
+            let slot_count = slot_names.len();
 
             egui::CentralPanel::default().show(ctx, |ui| {
                 title_bar(ui, "LimitedForge - Results");
@@ -683,10 +781,8 @@ impl LimitedForgeApp {
                     ui.add_space(8.0);
                     ui.label(
                         egui::RichText::new(format!(
-                            "{} | {} PLAYERS | {} PACKS",
-                            set_code.to_uppercase(),
-                            num_players,
-                            packs_per_player
+                            "{} PLAYERS | {} PACKS",
+                            num_players, slot_count,
                         ))
                         .monospace()
                         .strong(),
@@ -727,8 +823,7 @@ impl LimitedForgeApp {
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (p_idx, packs) in player_packs.iter().enumerate() {
-                        let player_label =
-                            format!(">> PLAYER {}", p_idx + 1);
+                        let player_label = format!(">> PLAYER {}", p_idx + 1);
                         egui::CollapsingHeader::new(
                             egui::RichText::new(&player_label).monospace().strong(),
                         )
@@ -745,7 +840,11 @@ impl LimitedForgeApp {
                             }
 
                             for (pk_idx, pack) in packs.iter().enumerate() {
-                                let pack_label = format!("  [PACK {}]", pk_idx + 1);
+                                let set_label = slot_names
+                                    .get(pk_idx)
+                                    .map(|s| format!(" — {}", s))
+                                    .unwrap_or_default();
+                                let pack_label = format!("  [PACK {}{}]", pk_idx + 1, set_label);
                                 egui::CollapsingHeader::new(
                                     egui::RichText::new(&pack_label).monospace(),
                                 )
@@ -772,7 +871,7 @@ impl LimitedForgeApp {
 
     fn export_to_moxfield(&mut self, dir: std::path::PathBuf) {
         let player_lines: Vec<Vec<String>> = match &self.screen {
-            Screen::Results { packs, promos } => packs
+            Screen::Results { packs, promos, .. } => packs
                 .iter()
                 .enumerate()
                 .map(|(p_idx, player_packs)| {
