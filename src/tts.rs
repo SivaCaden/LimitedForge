@@ -3,13 +3,14 @@
 use serde::Serialize;
 
 /// Scryfall image URL for a card given its scryfall_id.
-pub fn scryfall_image_url(scryfall_id: &str) -> String {
-    let c1 = &scryfall_id[0..1];
-    let c2 = &scryfall_id[1..2];
-    format!(
+pub fn scryfall_image_url(scryfall_id: &str) -> Option<String> {
+    let mut chars = scryfall_id.chars();
+    let c1 = chars.next()?;
+    let c2 = chars.next()?;
+    Some(format!(
         "https://cards.scryfall.io/normal/front/{}/{}/{}.jpg",
         c1, c2, scryfall_id
-    )
+    ))
 }
 
 /// Top-level TTS SavedObject.

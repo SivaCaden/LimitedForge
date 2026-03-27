@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use eframe::egui;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 
 use crate::data;
@@ -17,6 +17,13 @@ const MTGJSON_URL: &str = "https://mtgjson.com/api/v5/AllPrintings.json";
 enum Format {
     Limited,
     PreRelease,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum BoosterType {
+    Draft,
+    Play,
+    Collector,
 }
 
 enum DownloadMsg {
@@ -37,20 +44,144 @@ enum Screen {
     },
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum ColorSchemeId {
+    Classic,
+    Terminal,
+    Midnight,
+    Amber,
+    // You were warned.
+    Heresy,
+}
+
+impl ColorSchemeId {
+    const ALL: &'static [ColorSchemeId] = &[
+        ColorSchemeId::Classic,
+        ColorSchemeId::Terminal,
+        ColorSchemeId::Midnight,
+        ColorSchemeId::Amber,
+        ColorSchemeId::Heresy, // Do not select this at work, near children, or if you value your corneas.
+    ];
+}
+
+struct ColorScheme {
+    name: &'static str,
+    base_dark: bool,
+    /// Main surface background
+    bg: egui::Color32,
+    /// Hovered / slightly lighter surface
+    bg_hover: egui::Color32,
+    /// Mid-tone used for strokes and active fill
+    mid: egui::Color32,
+    /// Darker tone for borders and window outlines
+    dark: egui::Color32,
+    /// Highlight side of raised button border (white in Classic)
+    raised: egui::Color32,
+    /// Accent color — title bar and selection highlight
+    accent: egui::Color32,
+    /// Primary text color
+    fg: egui::Color32,
+    /// Text drawn on top of the accent color
+    fg_on_accent: egui::Color32,
+    /// Text-input field background
+    input_bg: egui::Color32,
+}
+
+impl ColorScheme {
+    fn for_id(id: ColorSchemeId) -> Self {
+        match id {
+            ColorSchemeId::Classic => Self {
+                name: "Classic",
+                base_dark: false,
+                bg:           egui::Color32::from_rgb(192, 192, 192),
+                bg_hover:     egui::Color32::from_rgb(210, 210, 210),
+                mid:          egui::Color32::from_rgb(128, 128, 128),
+                dark:         egui::Color32::from_rgb( 64,  64,  64),
+                raised:       egui::Color32::WHITE,
+                accent:       egui::Color32::from_rgb(  0,   0, 128),
+                fg:           egui::Color32::BLACK,
+                fg_on_accent: egui::Color32::WHITE,
+                input_bg:     egui::Color32::WHITE,
+            },
+            ColorSchemeId::Terminal => Self {
+                name: "Terminal",
+                base_dark: true,
+                bg:           egui::Color32::from_rgb( 12,  20,  12),
+                bg_hover:     egui::Color32::from_rgb( 24,  40,  24),
+                mid:          egui::Color32::from_rgb(  0,  80,  30),
+                dark:         egui::Color32::from_rgb(  0,  40,  12),
+                raised:       egui::Color32::from_rgb(  0, 160,  60),
+                accent:       egui::Color32::from_rgb(  0, 100,  30),
+                fg:           egui::Color32::from_rgb(  0, 220,  80),
+                fg_on_accent: egui::Color32::from_rgb(  0, 255, 100),
+                input_bg:     egui::Color32::from_rgb(  6,  10,   6),
+            },
+            ColorSchemeId::Midnight => Self {
+                name: "Midnight",
+                base_dark: true,
+                bg:           egui::Color32::from_rgb( 22,  26,  46),
+                bg_hover:     egui::Color32::from_rgb( 34,  40,  68),
+                mid:          egui::Color32::from_rgb( 60,  70, 120),
+                dark:         egui::Color32::from_rgb( 14,  18,  36),
+                raised:       egui::Color32::from_rgb( 90, 110, 180),
+                accent:       egui::Color32::from_rgb( 50,  70, 160),
+                fg:           egui::Color32::from_rgb(200, 205, 230),
+                fg_on_accent: egui::Color32::WHITE,
+                input_bg:     egui::Color32::from_rgb( 12,  14,  28),
+            },
+            ColorSchemeId::Amber => Self {
+                name: "Amber",
+                base_dark: true,
+                bg:           egui::Color32::from_rgb( 20,  14,   4),
+                bg_hover:     egui::Color32::from_rgb( 36,  26,   8),
+                mid:          egui::Color32::from_rgb(100,  60,  10),
+                dark:         egui::Color32::from_rgb( 50,  30,   5),
+                raised:       egui::Color32::from_rgb(200, 130,  20),
+                accent:       egui::Color32::from_rgb(110,  55,   8),
+                fg:           egui::Color32::from_rgb(255, 176,  28),
+                fg_on_accent: egui::Color32::from_rgb(255, 210,  70),
+                input_bg:     egui::Color32::from_rgb( 10,   7,   2),
+            },
+            // Congratulations. You found it. Or maybe you didn't find it so much as
+            // accidentally clicked it and now you can't read anything well enough to
+            // switch back. The background is lime green. The text is pure blue.
+            // Together they vibrate at a frequency that should be illegal.
+            // The title bar is neon orange with hot pink text.
+            // The input fields are magenta. The borders are bright cyan.
+            // Color theory calls this a "simultaneous contrast" effect.
+            // Optometrists call it "a reason to bill insurance."
+            // You call it "a mistake."
+            ColorSchemeId::Heresy => Self {
+                name: "Heresy",
+                base_dark: false,
+                bg:           egui::Color32::from_rgb(  0, 255,   0), // lime green — your new reality
+                bg_hover:     egui::Color32::from_rgb(255, 255,   0), // yellow on hover, somehow worse
+                mid:          egui::Color32::from_rgb(  0, 255, 255), // cyan borders, naturally
+                dark:         egui::Color32::from_rgb(255,   0, 255), // magenta "dark" — oxymoron
+                raised:       egui::Color32::from_rgb(255,   0,   0), // red raised edge, screaming
+                accent:       egui::Color32::from_rgb(255, 100,   0), // neon orange titlebar
+                fg:           egui::Color32::from_rgb(  0,   0, 255), // pure blue text on lime green
+                fg_on_accent: egui::Color32::from_rgb(255,   0, 255), // hot pink on orange
+                input_bg:     egui::Color32::from_rgb(255,   0, 255), // magenta input fields, readable by no one
+            },
+        }
+    }
+}
+
 pub struct LimitedForgeApp {
     screen: Screen,
     load_rx: Option<mpsc::Receiver<Result<AllPrintings, String>>>,
     download_rx: Option<mpsc::Receiver<DownloadMsg>>,
     download_progress: (u64, u64), // (downloaded, total)
     all_printings: Option<AllPrintings>,
-    sets: Vec<(String, String)>, // (code, name) sorted by name
+    sets: Vec<(String, String, bool, bool, bool)>, // (code, name, has_draft, has_play, has_collector)
     data_path: String,
 
     // Setup form
     format: Format,
     set_query: String,
-    selected_sets: Vec<(String, String, usize)>, // pack slots: (code, name, count)
-    predictions: Vec<(String, String)>,
+    selected_sets: Vec<(String, String, usize, BoosterType, bool, bool, bool)>, // (code, name, count, booster_type, has_draft, has_play, has_collector)
+    predictions: Vec<(String, String, bool, bool, bool)>, // (code, name, has_draft, has_play, has_collector)
     num_players: usize,
 
     // Loading animation
@@ -58,6 +189,8 @@ pub struct LimitedForgeApp {
 
     error: Option<String>,
     export_status: Option<String>,
+    show_settings: bool,
+    color_scheme: ColorSchemeId,
 }
 
 /// Returns the path to look for AllPrintings.json at startup.
@@ -107,6 +240,8 @@ impl LimitedForgeApp {
             tick: 0,
             error: None,
             export_status: None,
+            show_settings: false,
+            color_scheme: ColorSchemeId::Classic,
         }
     }
 
@@ -191,9 +326,9 @@ impl LimitedForgeApp {
             return;
         }
 
-        let mut exact: Vec<&(String, String)> = Vec::new();
-        let mut prefix: Vec<&(String, String)> = Vec::new();
-        let mut substr: Vec<&(String, String)> = Vec::new();
+        let mut exact: Vec<&(String, String, bool, bool, bool)> = Vec::new();
+        let mut prefix: Vec<&(String, String, bool, bool, bool)> = Vec::new();
+        let mut substr: Vec<&(String, String, bool, bool, bool)> = Vec::new();
 
         for entry in &self.sets {
             let code_lower = entry.0.to_lowercase();
@@ -375,7 +510,7 @@ impl LimitedForgeApp {
                         )
                     } else {
                         let bar_width = 20usize;
-                        let filled = ((self.tick / 2) % (bar_width as u64 + 1)) as usize;
+                        let filled = ((self.tick / 2) % bar_width as u64) as usize;
                         format!(
                             "[{}{}]  {:.1} MB received",
                             "█".repeat(filled),
@@ -406,16 +541,22 @@ impl LimitedForgeApp {
         if let Some(rx) = &self.load_rx {
             match rx.try_recv() {
                 Ok(Ok(data)) => {
-                    let mut sets: Vec<(String, String)> = data
+                    let mut sets: Vec<(String, String, bool, bool, bool)> = data
                         .data
                         .iter()
                         .filter(|(_, set)| {
                             set.booster
                                 .as_ref()
-                                .map(|b| b.contains_key("draft"))
+                                .map(|b| !b.is_empty())
                                 .unwrap_or(false)
                         })
-                        .map(|(code, set)| (code.clone(), set.name.clone()))
+                        .map(|(code, set)| {
+                            let boosters = set.booster.as_ref();
+                            let has_draft = boosters.map(|b| b.contains_key("draft")).unwrap_or(false);
+                            let has_play = boosters.map(|b| b.contains_key("play")).unwrap_or(false);
+                            let has_collector = boosters.map(|b| b.contains_key("collector")).unwrap_or(false);
+                            (code.clone(), set.name.clone(), has_draft, has_play, has_collector)
+                        })
                         .collect();
                     sets.sort_by(|a, b| a.1.cmp(&b.1));
                     self.sets = sets;
@@ -451,7 +592,7 @@ impl LimitedForgeApp {
                     );
                 } else {
                     let bar_width = 20usize;
-                    let filled = ((self.tick / 2) % (bar_width as u64 + 1)) as usize;
+                    let filled = ((self.tick / 2) % bar_width as u64) as usize;
                     let bar = format!(
                         "[{}{}]",
                         "█".repeat(filled),
@@ -475,14 +616,28 @@ impl LimitedForgeApp {
 
     fn show_setup(&mut self, ctx: &egui::Context) {
         let mut new_path: Option<String> = None;
-        // Slot to add/increment when user clicks a prediction
-        let mut add_slot: Option<(String, String)> = None;
+        let mut add_slot: Option<(String, String, bool, bool, bool)> = None; // (code, name, has_draft, has_play, has_collector)
         let mut decrement_idx: Option<usize> = None;
         let mut increment_idx: Option<usize> = None;
+        let mut set_booster: Option<(usize, BoosterType)> = None;
+        let mut toggle_settings = false;
+        let mut start_update = false;
+        let mut set_scheme: Option<ColorSchemeId> = None;
 
         egui::CentralPanel::default().show(ctx, |ui| {
             title_bar(ui, "LimitedForge - Setup");
-            ui.add_space(10.0);
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(egui::RichText::new("[ SETTINGS ]").monospace())
+                        .clicked()
+                    {
+                        toggle_settings = true;
+                    }
+                });
+            });
+            ui.add_space(6.0);
 
             retro_group(ui, |ui| {
                 ui.label(egui::RichText::new("DATA SOURCE").monospace().strong());
@@ -493,7 +648,7 @@ impl LimitedForgeApp {
                     ui.label(
                         egui::RichText::new(&self.data_path)
                             .monospace()
-                            .color(egui::Color32::from_rgb(0, 0, 128)),
+                            .color(ui.visuals().selection.bg_fill),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
@@ -573,13 +728,16 @@ impl LimitedForgeApp {
                 if !self.predictions.is_empty() {
                     let predictions = self.predictions.clone();
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        for (code, name) in &predictions {
-                            let label = format!("{} ({})", name, code);
+                        for (code, name, has_draft, has_play, has_collector) in &predictions {
+                            let mut tags = String::new();
+                            if *has_draft { tags.push_str(" [DRAFT]"); }
+                            if *has_play  { tags.push_str(" [PLAY]"); }
+                            let label = format!("{} ({}){}", name, code, tags);
                             if ui
                                 .selectable_label(false, egui::RichText::new(&label).monospace())
                                 .clicked()
                             {
-                                add_slot = Some((code.clone(), name.clone()));
+                                add_slot = Some((code.clone(), name.clone(), *has_draft, *has_play, *has_collector));
                             }
                         }
                     });
@@ -588,13 +746,15 @@ impl LimitedForgeApp {
                 // Slot list
                 if !self.selected_sets.is_empty() {
                     ui.add_space(4.0);
-                    let slots: Vec<(usize, String, String, usize)> = self
+                    let slots: Vec<(usize, String, String, usize, BoosterType, bool, bool, bool)> = self
                         .selected_sets
                         .iter()
                         .enumerate()
-                        .map(|(i, (c, n, cnt))| (i, c.clone(), n.clone(), *cnt))
+                        .map(|(i, (c, n, cnt, bt, hd, hp, hc))| {
+                            (i, c.clone(), n.clone(), *cnt, *bt, *hd, *hp, *hc)
+                        })
                         .collect();
-                    for (idx, code, name, count) in &slots {
+                    for (idx, code, name, count, booster_type, has_draft, has_play, has_collector) in &slots {
                         ui.horizontal(|ui| {
                             if ui
                                 .button(egui::RichText::new("[ - ]").monospace())
@@ -612,6 +772,69 @@ impl LimitedForgeApp {
                                 egui::RichText::new(format!("{}  {} ({})", count, name, code))
                                     .monospace(),
                             );
+                            let show_toggle = *has_draft || *has_play || *has_collector;
+                            if show_toggle {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if *has_collector {
+                                            ui.scope(|ui| {
+                                                let purple = egui::Color32::from_rgb(160, 100, 200);
+                                                let dark_purple = egui::Color32::from_rgb(110, 60, 150);
+                                                ui.visuals_mut().widgets.inactive.bg_fill = purple;
+                                                ui.visuals_mut().widgets.inactive.weak_bg_fill = purple;
+                                                ui.visuals_mut().widgets.hovered.bg_fill = dark_purple;
+                                                ui.visuals_mut().widgets.hovered.weak_bg_fill = dark_purple;
+                                                ui.visuals_mut().widgets.active.bg_fill = dark_purple;
+                                                ui.visuals_mut().widgets.active.weak_bg_fill = dark_purple;
+                                                ui.visuals_mut().selection.bg_fill = dark_purple;
+                                                if ui
+                                                    .selectable_label(
+                                                        *booster_type == BoosterType::Collector,
+                                                        egui::RichText::new("[COLL]").monospace(),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    set_booster = Some((*idx, BoosterType::Collector));
+                                                }
+                                            });
+                                        }
+                                        if *has_play {
+                                            ui.scope(|ui| {
+                                                let orange = egui::Color32::from_rgb(220, 130, 40);
+                                                let dark_orange = egui::Color32::from_rgb(170, 90, 20);
+                                                ui.visuals_mut().widgets.inactive.bg_fill = orange;
+                                                ui.visuals_mut().widgets.inactive.weak_bg_fill = orange;
+                                                ui.visuals_mut().widgets.hovered.bg_fill = dark_orange;
+                                                ui.visuals_mut().widgets.hovered.weak_bg_fill = dark_orange;
+                                                ui.visuals_mut().widgets.active.bg_fill = dark_orange;
+                                                ui.visuals_mut().widgets.active.weak_bg_fill = dark_orange;
+                                                ui.visuals_mut().selection.bg_fill = dark_orange;
+                                                if ui
+                                                    .selectable_label(
+                                                        *booster_type == BoosterType::Play,
+                                                        egui::RichText::new("[PLAY]").monospace(),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    set_booster = Some((*idx, BoosterType::Play));
+                                                }
+                                            });
+                                        }
+                                        if *has_draft {
+                                            if ui
+                                                .selectable_label(
+                                                    *booster_type == BoosterType::Draft,
+                                                    egui::RichText::new("[DRAFT]").monospace(),
+                                                )
+                                                .clicked()
+                                            {
+                                                set_booster = Some((*idx, BoosterType::Draft));
+                                            }
+                                        }
+                                    },
+                                );
+                            }
                         });
                     }
                 } else {
@@ -664,28 +887,125 @@ impl LimitedForgeApp {
         });
 
         let pack_cap = if self.format == Format::PreRelease { 6 } else { usize::MAX };
-        let total_packs: usize = self.selected_sets.iter().map(|(_, _, c)| c).sum();
+        let total_packs: usize = self.selected_sets.iter().map(|(_, _, c, _, _, _, _)| c).sum();
 
-        if let Some((code, name)) = add_slot {
+        if toggle_settings {
+            self.show_settings = !self.show_settings;
+        }
+
+        let mut settings_open = self.show_settings;
+        egui::Window::new(egui::RichText::new("SETTINGS").monospace().strong())
+            .open(&mut settings_open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                retro_group(ui, |ui| {
+                    ui.label(egui::RichText::new("APPEARANCE").monospace().strong());
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Color scheme:").monospace());
+                    ui.add_space(2.0);
+
+                    let current_name = ColorScheme::for_id(self.color_scheme).name;
+                    egui::ComboBox::from_id_salt("color_scheme_picker")
+                        .selected_text(egui::RichText::new(current_name).monospace())
+                        .width(220.0)
+                        .show_ui(ui, |ui| {
+                            for &id in ColorSchemeId::ALL {
+                                let scheme = ColorScheme::for_id(id);
+                                let is_selected = self.color_scheme == id;
+                                ui.horizontal(|ui| {
+                                    // Three color swatches: bg, accent, fg
+                                    let swatch_size = egui::vec2(16.0, 16.0);
+                                    let border = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.fg_stroke.color);
+                                    for &color in &[scheme.bg, scheme.accent, scheme.fg] {
+                                        let (rect, _) = ui.allocate_exact_size(swatch_size, egui::Sense::hover());
+                                        ui.painter().rect_filled(rect, 0.0, color);
+                                        ui.painter().rect_stroke(rect, 0.0, border, egui::StrokeKind::Middle);
+                                    }
+                                    if ui.selectable_label(is_selected, egui::RichText::new(scheme.name).monospace()).clicked() {
+                                        set_scheme = Some(id);
+                                    }
+                                });
+                            }
+                        });
+                });
+
+                ui.add_space(6.0);
+
+                retro_group(ui, |ui| {
+                    ui.label(egui::RichText::new("CARD DATA").monospace().strong());
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Delete the current AllPrintings.json and\ndownload the latest version from MTGJSON.",
+                        )
+                        .monospace()
+                        .weak(),
+                    );
+                    ui.add_space(6.0);
+                    if ui
+                        .button(
+                            egui::RichText::new("[ UPDATE AllPrintings.json ]")
+                                .monospace()
+                                .strong(),
+                        )
+                        .clicked()
+                    {
+                        start_update = true;
+                    }
+                });
+            });
+        self.show_settings = settings_open;
+
+        if let Some(id) = set_scheme {
+            self.color_scheme = id;
+        }
+
+        if start_update {
+            let path = std::path::Path::new(&self.data_path);
+            if path.exists() {
+                let _ = std::fs::remove_file(path);
+            }
+            self.show_settings = false;
+            self.error = None;
+            self.download_progress = (0, 0);
+            self.download_rx = Some(Self::start_download());
+            self.screen = Screen::Downloading;
+            return;
+        }
+
+        if let Some((code, name, has_draft, has_play, has_collector)) = add_slot {
             if total_packs < pack_cap {
-                if let Some(entry) = self.selected_sets.iter_mut().find(|(c, _, _)| *c == code) {
+                if let Some(entry) = self.selected_sets.iter_mut().find(|(c, _, _, _, _, _, _)| *c == code) {
                     entry.2 += 1;
                 } else {
-                    self.selected_sets.push((code, name, 1));
+                    let default_type = if has_draft { BoosterType::Draft }
+                        else if has_play { BoosterType::Play }
+                        else { BoosterType::Draft };
+                    self.selected_sets.push((code, name, 1, default_type, has_draft, has_play, has_collector));
                 }
             }
             self.set_query.clear();
             self.predictions.clear();
         }
         if let Some(idx) = decrement_idx {
-            self.selected_sets[idx].2 = self.selected_sets[idx].2.saturating_sub(1);
-            if self.selected_sets[idx].2 == 0 {
-                self.selected_sets.remove(idx);
+            if let Some(entry) = self.selected_sets.get_mut(idx) {
+                entry.2 = entry.2.saturating_sub(1);
+                if entry.2 == 0 {
+                    self.selected_sets.remove(idx);
+                }
             }
         }
         if let Some(idx) = increment_idx {
             if total_packs < pack_cap {
-                self.selected_sets[idx].2 += 1;
+                if let Some(entry) = self.selected_sets.get_mut(idx) {
+                    entry.2 += 1;
+                }
+            }
+        }
+        if let Some((idx, booster_type)) = set_booster {
+            if let Some(entry) = self.selected_sets.get_mut(idx) {
+                entry.3 = booster_type;
             }
         }
         if let Some(path) = new_path {
@@ -705,9 +1025,14 @@ impl LimitedForgeApp {
         // Build one PackGenerator per unique set code
         let mut generators: std::collections::HashMap<String, PackGenerator<'_>> =
             std::collections::HashMap::new();
-        for (code, _name, _count) in &self.selected_sets {
+        for (code, _name, _count, booster_type, _, _, _) in &self.selected_sets {
             if !generators.contains_key(code) {
-                match PackGenerator::new(code, &all_printings.data) {
+                let preferred = match booster_type {
+                    BoosterType::Draft => "draft",
+                    BoosterType::Play => "play",
+                    BoosterType::Collector => "collector",
+                };
+                match PackGenerator::new(code, &all_printings.data, preferred) {
                     Ok(g) => {
                         generators.insert(code.clone(), g);
                     }
@@ -722,11 +1047,11 @@ impl LimitedForgeApp {
         let mut rng = StdRng::from_entropy();
         let num_players = self.num_players;
 
-        // Expand (code, name, count) into flat (code, name) slot list
+        // Expand into flat (code, name) slot list
         let slots: Vec<(String, String)> = self
             .selected_sets
             .iter()
-            .flat_map(|(code, name, count)| {
+            .flat_map(|(code, name, count, _, _, _, _)| {
                 std::iter::repeat((code.clone(), name.clone())).take(*count)
             })
             .collect();
@@ -745,10 +1070,27 @@ impl LimitedForgeApp {
             player_packs.push(packs);
         }
 
+        // For Pre-Release, generate one rare/mythic promo per player drawn from
+        // a randomly chosen set among those being generated.
+        let promos: Vec<OwnedPackCard> = if self.format == Format::PreRelease {
+            let gen_keys: Vec<&String> = generators.keys().collect();
+            (0..num_players)
+                .filter_map(|_| {
+                    if gen_keys.is_empty() {
+                        return None;
+                    }
+                    let key = gen_keys[rng.gen_range(0..gen_keys.len())];
+                    generators.get(key)?.pick_promo(&mut rng)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         self.export_status = None;
         self.screen = Screen::Results {
             packs: player_packs,
-            promos: Vec::new(),
+            promos,
             slot_names,
         };
     }
@@ -907,11 +1249,12 @@ impl LimitedForgeApp {
     }
 }
 
-/// Windows 95-style title bar with navy background.
+/// Windows 95-style title bar — color follows the active scheme's accent.
 fn title_bar(ui: &mut egui::Ui, title: &str) {
-    let navy = egui::Color32::from_rgb(0, 0, 128);
+    let accent = ui.visuals().selection.bg_fill;
+    let text_color = ui.visuals().selection.stroke.color;
     egui::Frame::new()
-        .fill(navy)
+        .fill(accent)
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -920,13 +1263,13 @@ fn title_bar(ui: &mut egui::Ui, title: &str) {
                     egui::RichText::new(title)
                         .monospace()
                         .strong()
-                        .color(egui::Color32::WHITE),
+                        .color(text_color),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         egui::RichText::new("[X]")
                             .monospace()
-                            .color(egui::Color32::WHITE),
+                            .color(text_color),
                     );
                 });
             });
@@ -935,18 +1278,16 @@ fn title_bar(ui: &mut egui::Ui, title: &str) {
 
 /// A retro raised-border group box.
 fn retro_group(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    let stroke_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
     egui::Frame::new()
-        .stroke(egui::Stroke::new(
-            2.0,
-            egui::Color32::from_rgb(128, 128, 128),
-        ))
+        .stroke(egui::Stroke::new(2.0, stroke_color))
         .inner_margin(egui::Margin::same(8))
         .show(ui, add_contents);
 }
 
 /// A plain horizontal separator line.
 fn separator(ui: &mut egui::Ui) {
-    let gray = egui::Color32::from_rgb(128, 128, 128);
+    let gray = ui.visuals().widgets.noninteractive.bg_stroke.color;
     ui.painter().hline(
         ui.available_rect_before_wrap().x_range(),
         ui.cursor().top(),
@@ -997,89 +1338,67 @@ fn rarity_color(rarity: &str) -> (&'static str, egui::Color32) {
     }
 }
 
-fn apply_retro_theme(ctx: &egui::Context) {
-    let gray = egui::Color32::from_rgb(192, 192, 192);
-    let dark_gray = egui::Color32::from_rgb(128, 128, 128);
-    let darker_gray = egui::Color32::from_rgb(64, 64, 64);
-    let navy = egui::Color32::from_rgb(0, 0, 128);
-    let white = egui::Color32::WHITE;
-    let black = egui::Color32::BLACK;
+fn apply_theme(ctx: &egui::Context, scheme: &ColorScheme) {
     let zero = egui::CornerRadius::ZERO;
 
-    let mut visuals = egui::Visuals::light();
+    let mut visuals = if scheme.base_dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
 
-    visuals.panel_fill = gray;
-    visuals.window_fill = gray;
-    visuals.faint_bg_color = egui::Color32::from_rgb(212, 208, 200);
-    visuals.extreme_bg_color = white;
+    visuals.panel_fill = scheme.bg;
+    visuals.window_fill = scheme.bg;
+    visuals.faint_bg_color = scheme.bg_hover;
+    visuals.extreme_bg_color = scheme.input_bg;
     visuals.window_shadow = egui::Shadow::NONE;
     visuals.popup_shadow = egui::Shadow::NONE;
     visuals.window_corner_radius = zero;
     visuals.menu_corner_radius = zero;
-    visuals.window_stroke = egui::Stroke::new(2.0, darker_gray);
+    visuals.window_stroke = egui::Stroke::new(2.0, scheme.dark);
 
-    visuals.selection.bg_fill = navy;
-    visuals.selection.stroke = egui::Stroke::new(1.0, white);
+    visuals.selection.bg_fill = scheme.accent;
+    visuals.selection.stroke = egui::Stroke::new(1.0, scheme.fg_on_accent);
 
-    // noninteractive
-    visuals.widgets.noninteractive.bg_fill = gray;
-    visuals.widgets.noninteractive.weak_bg_fill = gray;
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, dark_gray);
+    visuals.widgets.noninteractive.bg_fill = scheme.bg;
+    visuals.widgets.noninteractive.weak_bg_fill = scheme.bg;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, scheme.mid);
     visuals.widgets.noninteractive.corner_radius = zero;
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, black);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, scheme.fg);
 
-    // inactive (buttons at rest)
-    visuals.widgets.inactive.bg_fill = gray;
-    visuals.widgets.inactive.weak_bg_fill = gray;
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(2.0, white);
+    visuals.widgets.inactive.bg_fill = scheme.bg;
+    visuals.widgets.inactive.weak_bg_fill = scheme.bg;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(2.0, scheme.raised);
     visuals.widgets.inactive.corner_radius = zero;
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, black);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, scheme.fg);
 
-    // hovered
-    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(210, 210, 210);
-    visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(210, 210, 210);
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(2.0, dark_gray);
+    visuals.widgets.hovered.bg_fill = scheme.bg_hover;
+    visuals.widgets.hovered.weak_bg_fill = scheme.bg_hover;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(2.0, scheme.mid);
     visuals.widgets.hovered.corner_radius = zero;
-    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, black);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, scheme.fg);
 
-    // active (pressed)
-    visuals.widgets.active.bg_fill = dark_gray;
-    visuals.widgets.active.weak_bg_fill = dark_gray;
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0, darker_gray);
+    visuals.widgets.active.bg_fill = scheme.mid;
+    visuals.widgets.active.weak_bg_fill = scheme.mid;
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0, scheme.dark);
     visuals.widgets.active.corner_radius = zero;
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, black);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, scheme.fg);
 
-    // open (combo/collapsing)
-    visuals.widgets.open.bg_fill = gray;
-    visuals.widgets.open.weak_bg_fill = gray;
-    visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, dark_gray);
+    visuals.widgets.open.bg_fill = scheme.bg;
+    visuals.widgets.open.weak_bg_fill = scheme.bg;
+    visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, scheme.mid);
     visuals.widgets.open.corner_radius = zero;
-    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, black);
+    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, scheme.fg);
 
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
     style.text_styles = [
-        (
-            egui::TextStyle::Heading,
-            egui::FontId::proportional(18.0),
-        ),
-        (
-            egui::TextStyle::Body,
-            egui::FontId::monospace(13.0),
-        ),
-        (
-            egui::TextStyle::Monospace,
-            egui::FontId::monospace(13.0),
-        ),
-        (
-            egui::TextStyle::Button,
-            egui::FontId::monospace(13.0),
-        ),
-        (
-            egui::TextStyle::Small,
-            egui::FontId::monospace(11.0),
-        ),
+        (egui::TextStyle::Heading,  egui::FontId::proportional(18.0)),
+        (egui::TextStyle::Body,     egui::FontId::monospace(13.0)),
+        (egui::TextStyle::Monospace,egui::FontId::monospace(13.0)),
+        (egui::TextStyle::Button,   egui::FontId::monospace(13.0)),
+        (egui::TextStyle::Small,    egui::FontId::monospace(11.0)),
     ]
     .into();
     style.spacing.button_padding = egui::vec2(8.0, 4.0);
@@ -1089,7 +1408,7 @@ fn apply_retro_theme(ctx: &egui::Context) {
 
 impl eframe::App for LimitedForgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        apply_retro_theme(ctx);
+        apply_theme(ctx, &ColorScheme::for_id(self.color_scheme));
         match &self.screen {
             Screen::DataSource => self.show_data_source(ctx),
             Screen::Downloading => self.show_downloading(ctx),

@@ -46,6 +46,7 @@ impl<'a> PackGenerator<'a> {
     pub fn new(
         set_code: &str,
         all_sets: &'a HashMap<String, MtgSet>,
+        preferred: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let set = all_sets
             .get(set_code)
@@ -55,8 +56,11 @@ impl<'a> PackGenerator<'a> {
             .as_ref()
             .ok_or_else(|| format!("Set '{}' has no booster data", set_code))?;
         let booster_config = booster_map
-            .get("draft")
-            .ok_or_else(|| format!("Set '{}' has no draft booster config", set_code))?;
+            .get(preferred)
+            .or_else(|| booster_map.get("draft"))
+            .or_else(|| booster_map.get("play"))
+            .or_else(|| booster_map.values().next())
+            .ok_or_else(|| format!("Set '{}' has no booster config", set_code))?;
 
         // Collect cards from all source sets (e.g. STX + STA for Strixhaven)
         let source_codes: Vec<&str> = booster_config
@@ -89,6 +93,20 @@ impl<'a> PackGenerator<'a> {
         })
     }
 
+    /// Pick one rare or mythic card uniformly at random from the card pool.
+    pub fn pick_promo(&self, rng: &mut impl Rng) -> Option<OwnedPackCard> {
+        let eligible: Vec<&Card> = self.card_pool
+            .values()
+            .copied()
+            .filter(|c| c.rarity == "rare" || c.rarity == "mythic")
+            .collect();
+        if eligible.is_empty() {
+            return None;
+        }
+        let card = eligible[rng.gen_range(0..eligible.len())];
+        Some(OwnedPackCard::from_card(card, false))
+    }
+
     pub fn generate_pack(&self, rng: &mut impl Rng) -> Vec<PackCard<'a>> {
         let booster_items: Vec<_> = self
             .booster_config
@@ -96,11 +114,14 @@ impl<'a> PackGenerator<'a> {
             .iter()
             .map(|b| (b, b.weight))
             .collect();
-        let variant = weighted_choice(
+        let variant = match weighted_choice(
             &booster_items,
             self.booster_config.boosters_total_weight,
             rng,
-        );
+        ) {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
 
         let mut pack = Vec::new();
 
@@ -117,7 +138,10 @@ impl<'a> PackGenerator<'a> {
                 .collect();
 
             for _ in 0..count {
-                let uuid = weighted_choice(&card_entries, sheet.total_weight, rng);
+                let uuid = match weighted_choice(&card_entries, sheet.total_weight, rng) {
+                    Some(u) => u,
+                    None => continue,
+                };
                 if let Some(&card) = self.card_pool.get(uuid) {
                     pack.push(PackCard {
                         card,
@@ -131,14 +155,17 @@ impl<'a> PackGenerator<'a> {
     }
 }
 
-fn weighted_choice<'a, T>(items: &'a [(T, u64)], total: u64, rng: &mut impl Rng) -> &'a T {
+fn weighted_choice<'a, T>(items: &'a [(T, u64)], total: u64, rng: &mut impl Rng) -> Option<&'a T> {
+    if items.is_empty() || total == 0 {
+        return None;
+    }
     let mut roll = rng.gen_range(0..total);
     for (item, weight) in items {
         if roll < *weight {
-            return item;
+            return Some(item);
         }
         roll -= weight;
     }
     // Fallback to last element (handles rounding edge cases)
-    &items[items.len() - 1].0
+    Some(&items[items.len() - 1].0)
 }
