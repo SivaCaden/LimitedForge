@@ -1101,6 +1101,7 @@ impl LimitedForgeApp {
 
         let mut go_back = false;
         let mut export_dir: Option<std::path::PathBuf> = None;
+        let mut export_mgo_dir: Option<std::path::PathBuf> = None;
 
         {
             let (player_packs, promos, slot_names) = match &self.screen {
@@ -1143,6 +1144,20 @@ impl LimitedForgeApp {
                                     .pick_folder()
                                 {
                                     export_dir = Some(dir);
+                                }
+                            }
+                            ui.add_space(4.0);
+                            if ui
+                                .button(
+                                    egui::RichText::new("[EXPORT TO MTGO]").monospace(),
+                                )
+                                .clicked()
+                            {
+                                if let Some(dir) = rfd::FileDialog::new()
+                                    .set_title("Choose export folder")
+                                    .pick_folder()
+                                {
+                                    export_mgo_dir = Some(dir);
                                 }
                             }
                         },
@@ -1209,6 +1224,9 @@ impl LimitedForgeApp {
         if let Some(dir) = export_dir {
             self.export_to_moxfield(dir);
         }
+        if let Some(dir) = export_mgo_dir {
+            self.export_to_mgo(dir);
+        }
     }
 
     fn export_to_moxfield(&mut self, dir: std::path::PathBuf) {
@@ -1243,6 +1261,43 @@ impl LimitedForgeApp {
 
         self.export_status = Some(format!(
             "Exported {} files to {}",
+            count,
+            dir.display()
+        ));
+    }
+
+    fn export_to_mgo(&mut self, dir: std::path::PathBuf) {
+        let player_lines: Vec<Vec<String>> = match &self.screen {
+            Screen::Results { packs, promos, .. } => packs
+                .iter()
+                .enumerate()
+                .map(|(p_idx, player_packs)| {
+                    let mut lines = Vec::new();
+                    if let Some(promo) = promos.get(p_idx) {
+                        lines.push(mgo_line(promo));
+                    }
+                    for pack in player_packs {
+                        for card in pack {
+                            lines.push(mgo_line(card));
+                        }
+                    }
+                    lines
+                })
+                .collect(),
+            _ => return,
+        };
+
+        let count = player_lines.len();
+        for (p_idx, lines) in player_lines.iter().enumerate() {
+            let path = dir.join(format!("player_{}_mtgo.txt", p_idx + 1));
+            if let Err(e) = std::fs::write(&path, lines.join("\n")) {
+                self.export_status = Some(format!("Export failed: {}", e));
+                return;
+            }
+        }
+
+        self.export_status = Some(format!(
+            "Exported {} MTGO files to {}",
             count,
             dir.display()
         ));
@@ -1316,6 +1371,10 @@ fn card_row(ui: &mut egui::Ui, card: &OwnedPackCard) {
             );
         });
     });
+}
+
+fn mgo_line(card: &OwnedPackCard) -> String {
+    format!("1 {}", card.name)
 }
 
 fn moxfield_line(card: &OwnedPackCard) -> String {
