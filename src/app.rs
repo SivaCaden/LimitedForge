@@ -52,6 +52,7 @@ enum ColorSchemeId {
     Amber,
     // You were warned.
     Heresy,
+    Custom,
 }
 
 impl ColorSchemeId {
@@ -61,11 +62,13 @@ impl ColorSchemeId {
         ColorSchemeId::Midnight,
         ColorSchemeId::Amber,
         ColorSchemeId::Heresy, // Do not select this at work, near children, or if you value your corneas.
+        ColorSchemeId::Custom,
     ];
 }
 
+#[derive(Clone)]
 struct ColorScheme {
-    name: &'static str,
+    name: String,
     base_dark: bool,
     /// Main surface background
     bg: egui::Color32,
@@ -91,7 +94,7 @@ impl ColorScheme {
     fn for_id(id: ColorSchemeId) -> Self {
         match id {
             ColorSchemeId::Classic => Self {
-                name: "Classic",
+                name: "Classic".to_string(),
                 base_dark: false,
                 bg:           egui::Color32::from_rgb(192, 192, 192),
                 bg_hover:     egui::Color32::from_rgb(210, 210, 210),
@@ -104,7 +107,7 @@ impl ColorScheme {
                 input_bg:     egui::Color32::WHITE,
             },
             ColorSchemeId::Terminal => Self {
-                name: "Terminal",
+                name: "Terminal".to_string(),
                 base_dark: true,
                 bg:           egui::Color32::from_rgb( 12,  20,  12),
                 bg_hover:     egui::Color32::from_rgb( 24,  40,  24),
@@ -117,7 +120,7 @@ impl ColorScheme {
                 input_bg:     egui::Color32::from_rgb(  6,  10,   6),
             },
             ColorSchemeId::Midnight => Self {
-                name: "Midnight",
+                name: "Midnight".to_string(),
                 base_dark: true,
                 bg:           egui::Color32::from_rgb( 22,  26,  46),
                 bg_hover:     egui::Color32::from_rgb( 34,  40,  68),
@@ -130,7 +133,7 @@ impl ColorScheme {
                 input_bg:     egui::Color32::from_rgb( 12,  14,  28),
             },
             ColorSchemeId::Amber => Self {
-                name: "Amber",
+                name: "Amber".to_string(),
                 base_dark: true,
                 bg:           egui::Color32::from_rgb( 20,  14,   4),
                 bg_hover:     egui::Color32::from_rgb( 36,  26,   8),
@@ -152,7 +155,7 @@ impl ColorScheme {
             // Optometrists call it "a reason to bill insurance."
             // You call it "a mistake."
             ColorSchemeId::Heresy => Self {
-                name: "Heresy",
+                name: "Heresy".to_string(),
                 base_dark: false,
                 bg:           egui::Color32::from_rgb(  0, 255,   0), // lime green — your new reality
                 bg_hover:     egui::Color32::from_rgb(255, 255,   0), // yellow on hover, somehow worse
@@ -164,6 +167,43 @@ impl ColorScheme {
                 fg_on_accent: egui::Color32::from_rgb(255,   0, 255), // hot pink on orange
                 input_bg:     egui::Color32::from_rgb(255,   0, 255), // magenta input fields, readable by no one
             },
+            // Custom is handled externally; for_id should never be called with it.
+            ColorSchemeId::Custom => Self::for_id(ColorSchemeId::Classic),
+        }
+    }
+}
+
+/// Serializable representation of a ColorScheme — uses [u8; 3] arrays instead of Color32.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ColorSchemeJson {
+    name: String,
+    base_dark: bool,
+    bg:           [u8; 3],
+    bg_hover:     [u8; 3],
+    mid:          [u8; 3],
+    dark:         [u8; 3],
+    raised:       [u8; 3],
+    accent:       [u8; 3],
+    fg:           [u8; 3],
+    fg_on_accent: [u8; 3],
+    input_bg:     [u8; 3],
+}
+
+impl ColorSchemeJson {
+    fn from_scheme(s: &ColorScheme) -> Self {
+        fn rgb(c: egui::Color32) -> [u8; 3] { [c.r(), c.g(), c.b()] }
+        Self {
+            name:         s.name.clone(),
+            base_dark:    s.base_dark,
+            bg:           rgb(s.bg),
+            bg_hover:     rgb(s.bg_hover),
+            mid:          rgb(s.mid),
+            dark:         rgb(s.dark),
+            raised:       rgb(s.raised),
+            accent:       rgb(s.accent),
+            fg:           rgb(s.fg),
+            fg_on_accent: rgb(s.fg_on_accent),
+            input_bg:     rgb(s.input_bg),
         }
     }
 }
@@ -191,6 +231,7 @@ pub struct LimitedForgeApp {
     export_status: Option<String>,
     show_settings: bool,
     color_scheme: ColorSchemeId,
+    custom_scheme: ColorScheme,
 }
 
 /// Returns the path to look for AllPrintings.json at startup.
@@ -242,6 +283,7 @@ impl LimitedForgeApp {
             export_status: None,
             show_settings: false,
             color_scheme: ColorSchemeId::Classic,
+            custom_scheme: ColorScheme::for_id(ColorSchemeId::Classic),
         }
     }
 
@@ -678,7 +720,7 @@ impl LimitedForgeApp {
                     if ui
                         .selectable_label(
                             self.format == Format::Limited,
-                            egui::RichText::new("Limited").monospace(),
+                            egui::RichText::new("Draft").monospace(),
                         )
                         .clicked()
                     {
@@ -697,7 +739,7 @@ impl LimitedForgeApp {
                         if ui
                             .selectable_label(
                                 self.format == Format::PreRelease,
-                                egui::RichText::new("Pre-Release").monospace(),
+                                egui::RichText::new("Limited").monospace(),
                             )
                             .clicked()
                         {
@@ -857,7 +899,7 @@ impl LimitedForgeApp {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Players:").monospace());
                     if self.format == Format::PreRelease {
-                        ui.label(egui::RichText::new("1  (Pre-Release)").monospace().weak());
+                        ui.label(egui::RichText::new("1  (Limited)").monospace().weak());
                     } else {
                         ui.add(egui::Slider::new(&mut self.num_players, 1..=16));
                     }
@@ -897,38 +939,92 @@ impl LimitedForgeApp {
         egui::Window::new(egui::RichText::new("SETTINGS").monospace().strong())
             .open(&mut settings_open)
             .collapsible(false)
-            .resizable(false)
+            .resizable(true)
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
                 retro_group(ui, |ui| {
                     ui.label(egui::RichText::new("APPEARANCE").monospace().strong());
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("Color scheme:").monospace());
                     ui.add_space(2.0);
 
-                    let current_name = ColorScheme::for_id(self.color_scheme).name;
+                    let current_name = if self.color_scheme == ColorSchemeId::Custom {
+                        self.custom_scheme.name.clone()
+                    } else {
+                        ColorScheme::for_id(self.color_scheme).name
+                    };
                     egui::ComboBox::from_id_salt("color_scheme_picker")
                         .selected_text(egui::RichText::new(current_name).monospace())
                         .width(220.0)
                         .show_ui(ui, |ui| {
                             for &id in ColorSchemeId::ALL {
-                                let scheme = ColorScheme::for_id(id);
                                 let is_selected = self.color_scheme == id;
+                                let (bg, accent, fg, label) = if id == ColorSchemeId::Custom {
+                                    (
+                                        self.custom_scheme.bg,
+                                        self.custom_scheme.accent,
+                                        self.custom_scheme.fg,
+                                        self.custom_scheme.name.clone(),
+                                    )
+                                } else {
+                                    let s = ColorScheme::for_id(id);
+                                    (s.bg, s.accent, s.fg, s.name)
+                                };
                                 ui.horizontal(|ui| {
-                                    // Three color swatches: bg, accent, fg
                                     let swatch_size = egui::vec2(16.0, 16.0);
                                     let border = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.fg_stroke.color);
-                                    for &color in &[scheme.bg, scheme.accent, scheme.fg] {
+                                    for &color in &[bg, accent, fg] {
                                         let (rect, _) = ui.allocate_exact_size(swatch_size, egui::Sense::hover());
                                         ui.painter().rect_filled(rect, 0.0, color);
                                         ui.painter().rect_stroke(rect, 0.0, border, egui::StrokeKind::Middle);
                                     }
-                                    if ui.selectable_label(is_selected, egui::RichText::new(scheme.name).monospace()).clicked() {
+                                    if ui.selectable_label(is_selected, egui::RichText::new(label).monospace()).clicked() {
                                         set_scheme = Some(id);
                                     }
                                 });
                             }
                         });
                 });
+
+                if self.color_scheme == ColorSchemeId::Custom {
+                    ui.add_space(6.0);
+                    retro_group(ui, |ui| {
+                        ui.label(egui::RichText::new("CUSTOM COLOR EDITOR").monospace().strong());
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Name:").monospace());
+                            ui.text_edit_singleline(&mut self.custom_scheme.name);
+                        });
+                        ui.add_space(4.0);
+                        ui.checkbox(&mut self.custom_scheme.base_dark, egui::RichText::new("Dark base theme").monospace());
+                        ui.add_space(6.0);
+
+                        color_row(ui, "bg           (background)", &mut self.custom_scheme.bg);
+                        color_row(ui, "bg_hover     (hover background)", &mut self.custom_scheme.bg_hover);
+                        color_row(ui, "mid          (strokes / borders)", &mut self.custom_scheme.mid);
+                        color_row(ui, "dark         (dark borders)", &mut self.custom_scheme.dark);
+                        color_row(ui, "raised       (raised highlight)", &mut self.custom_scheme.raised);
+                        color_row(ui, "accent       (title bar / selection)", &mut self.custom_scheme.accent);
+                        color_row(ui, "fg           (foreground text)", &mut self.custom_scheme.fg);
+                        color_row(ui, "fg_on_accent (text on accent)", &mut self.custom_scheme.fg_on_accent);
+                        color_row(ui, "input_bg     (input background)", &mut self.custom_scheme.input_bg);
+
+                        ui.add_space(6.0);
+                        if ui.button(egui::RichText::new("[ SAVE COLOR SCHEME ]").monospace().strong()).clicked() {
+                            let json_data = ColorSchemeJson::from_scheme(&self.custom_scheme);
+                            if let Ok(text) = serde_json::to_string_pretty(&json_data) {
+                                let filename = format!("{}.json", self.custom_scheme.name);
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .set_file_name(&filename)
+                                    .add_filter("JSON", &["json"])
+                                    .save_file()
+                                {
+                                    let _ = std::fs::write(path, text);
+                                }
+                            }
+                        }
+                    });
+                }
 
                 ui.add_space(6.0);
 
@@ -954,6 +1050,7 @@ impl LimitedForgeApp {
                         start_update = true;
                     }
                 });
+                }); // ScrollArea
             });
         self.show_settings = settings_open;
 
@@ -1340,6 +1437,36 @@ fn retro_group(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
         .show(ui, add_contents);
 }
 
+/// RGB slider rows for a single color in the custom scheme editor.
+fn color_row(ui: &mut egui::Ui, label: &str, color: &mut egui::Color32) {
+    let [mut r, mut g, mut b, _] = color.to_array();
+    ui.horizontal(|ui| {
+        let swatch_size = egui::vec2(20.0, 14.0);
+        let (rect, _) = ui.allocate_exact_size(swatch_size, egui::Sense::hover());
+        let border = egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.fg_stroke.color);
+        ui.painter().rect_filled(rect, 0.0, *color);
+        ui.painter().rect_stroke(rect, 0.0, border, egui::StrokeKind::Middle);
+        ui.label(egui::RichText::new(label).monospace());
+    });
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("R").monospace().strong().color(egui::Color32::from_rgb(210, 80, 80)));
+        ui.add(egui::Slider::new(&mut r, 0u8..=255u8).show_value(false));
+        ui.add(egui::DragValue::new(&mut r).range(0..=255));
+    });
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("G").monospace().strong().color(egui::Color32::from_rgb(80, 180, 80)));
+        ui.add(egui::Slider::new(&mut g, 0u8..=255u8).show_value(false));
+        ui.add(egui::DragValue::new(&mut g).range(0..=255));
+    });
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("B").monospace().strong().color(egui::Color32::from_rgb(80, 120, 220)));
+        ui.add(egui::Slider::new(&mut b, 0u8..=255u8).show_value(false));
+        ui.add(egui::DragValue::new(&mut b).range(0..=255));
+    });
+    *color = egui::Color32::from_rgb(r, g, b);
+    ui.add_space(4.0);
+}
+
 /// A plain horizontal separator line.
 fn separator(ui: &mut egui::Ui) {
     let gray = ui.visuals().widgets.noninteractive.bg_stroke.color;
@@ -1467,7 +1594,12 @@ fn apply_theme(ctx: &egui::Context, scheme: &ColorScheme) {
 
 impl eframe::App for LimitedForgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        apply_theme(ctx, &ColorScheme::for_id(self.color_scheme));
+        let active_scheme = if self.color_scheme == ColorSchemeId::Custom {
+            self.custom_scheme.clone()
+        } else {
+            ColorScheme::for_id(self.color_scheme)
+        };
+        apply_theme(ctx, &active_scheme);
         match &self.screen {
             Screen::DataSource => self.show_data_source(ctx),
             Screen::Downloading => self.show_downloading(ctx),
