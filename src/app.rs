@@ -15,7 +15,7 @@ const MTGJSON_URL: &str = "https://mtgjson.com/api/v5/AllPrintings.json";
 
 #[derive(PartialEq, Clone, Copy)]
 enum Format {
-    Sealed,
+    Limited,
     PreRelease,
 }
 
@@ -232,7 +232,7 @@ impl LimitedForgeApp {
             all_printings: None,
             sets: Vec::new(),
             data_path: default_path,
-            format: Format::Sealed,
+            format: Format::Limited,
             set_query: String::new(),
             selected_sets: Vec::new(),
             predictions: Vec::new(),
@@ -677,12 +677,12 @@ impl LimitedForgeApp {
                     ui.add_space(4.0);
                     if ui
                         .selectable_label(
-                            self.format == Format::Sealed,
-                            egui::RichText::new("Sealed").monospace(),
+                            self.format == Format::Limited,
+                            egui::RichText::new("Limited").monospace(),
                         )
                         .clicked()
                     {
-                        self.format = Format::Sealed;
+                        self.format = Format::Limited;
                     }
                     ui.scope(|ui| {
                         let red = egui::Color32::from_rgb(180, 0, 0);
